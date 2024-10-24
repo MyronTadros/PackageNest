@@ -1,5 +1,24 @@
 'use strict';
 
+import awsSdk from "aws-sdk";
+import "dotenv/config";
+import { PutObjectRequest } from "aws-sdk/clients/s3";
+
+const bucketName = process.env.S3_BUCKET_NAME;
+const s3 = new awsSdk.S3();
+
+// Import the 'pg' library
+const { Pool  } = require('pg');
+
+// Database connection configuration
+const dbConfig = new Pool  ({
+  user: process.env.RDS_USER,            // PostgreSQL DB username
+  host: process.env.RDS_HOST,            // RDS endpoint (from AWS RDS console)
+  database: process.env.RDS_DATABASE,    // Your database name
+  password: process.env.RDS_PASSWORD,    // Your RDS password
+  port: process.env.RDS_PORT,            // Default PostgreSQL port
+});
+
 /**
  * Types
  */
@@ -185,25 +204,71 @@ export function packageByRegExGet(body: PackageQuery, xAuthorization: Authentica
  * @returns Promise<Package>
  */
 export function packageCreate(body: Package, xAuthorization: AuthenticationToken): Promise<Package> {
-  return new Promise(function(resolve) {
-    const examples: { [key: string]: Package } = {
-      'application/json': {
-        "metadata": {
-          "Version": "1.2.3",
-          "ID": "123567192081501",
-          "Name": "Name"
-        },
-        "data": {
-          "Content": "Content",
-          "debloat": true,
-          "JSProgram": "JSProgram",
-          "URL": "URL"
-        }
-      }
+  return new Promise(function (resolve, reject) {
+    if (!body || !body.metadata || !body.data) {
+      return reject({
+        message: "Invalid request body. 'metadata' and 'data' are required.",
+        status: 400
+      });
+    }
+
+    // Define the S3 key (path in the bucket) where the package will be stored
+    const s3Key = `packages/${body.metadata.Name}/v${body.metadata.Version}/package.json`;
+
+    const s3Params: PutObjectRequest = {
+      Bucket: bucketName!,
+      Key: s3Key,
+      Body: JSON.stringify(body),  // Package content in JSON format
+      ContentType: "application/json",
     };
-    resolve(examples['application/json']);
+
+    // Upload the package to S3
+    s3.putObject(s3Params, function (err, data) {
+      if (err) {
+        reject({
+          message: `Failed to upload package to S3: ${err.message}`,
+          status: 500
+        });
+      } else {
+        console.log(`Package uploaded successfully: ${data.ETag}`);
+
+        const query = `
+        INSERT INTO packages (name, version, score)
+        VALUES ($1, $2, $3) RETURNING id;
+      `;
+        const values = [body.metadata.Name, body.metadata.Version, body.data.Content.length]; // Assuming score is based on content length for demonstration
+        console.log(`hi`);
+        dbConfig.query(query, values)
+          .then((res: { rows: { id: number }[] }) => {
+              console.log('Package inserted successfully:', res.rows[0].id); // Log success
+          })
+          .catch((dbErr: Error) => {
+              console.error('Failed to insert package into the database:', dbErr.message); // Log error
+          })
+          .finally(() => {
+              dbConfig.end(); // Ensure to close the client connection
+          });
+        }
+    });
   });
 }
+/* BASE INPUT: Put it as body in postman
+
+{
+  "metadata": {
+    "Version": "1.0.0",
+    "ID": "1234567890",
+    "Name": "ExamplePackage"
+  },
+  "data": {
+    "Content": "This is a sample content for the package.",
+    "debloat": false,
+    "JSProgram": "console.log('Hello World!');",
+    "URL": "https://example.com/package/example.zip"
+  }
+}
+  
+*/
 
 /**
  * (NON-BASELINE)
@@ -295,7 +360,7 @@ export function packageRetrieve(xAuthorization: AuthenticationToken, id: Package
           "Content": "Content",
           "debloat": true,
           "JSProgram": "JSProgram",
-          "URL": "URL"
+          "URL": "URL1"
         }
       }
     };
